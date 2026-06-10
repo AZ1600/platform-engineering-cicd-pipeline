@@ -1,21 +1,4 @@
-# Platform Engineering CI/CD Pipeline
-
-## Overview
-
-This project demonstrates a Continuous Integration and Continuous Deployment (CI/CD) pipeline using GitHub Actions.
-
-The goal is to automate application delivery using modern Platform Engineering practices.
-
-## Technologies
-
-* GitHub Actions
-* Git
-* GitHub
-* Docker (planned)
-* Amazon ECR (planned)
-* Kubernetes (planned)
-
-## Architecture
+## Current CI/CD Workflow
 
 Developer
 ↓
@@ -23,14 +6,15 @@ Git Push
 ↓
 GitHub Actions
 ↓
-Build & Test
+Docker Build
 ↓
-Docker Image
-↓
-Amazon ECR
-↓
-Kubernetes Deployment
+Docker Validation
 
-## Status
+## Skills Demonstrated
 
-🚧 In Progress
+* GitHub Actions
+* Continuous Integration (CI)
+* Docker Image Builds
+* Automation
+* Git & GitHub Workflows
+* Platform Engineering Fundamentals

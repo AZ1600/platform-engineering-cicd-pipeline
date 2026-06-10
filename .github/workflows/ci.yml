@@ -1,4 +1,4 @@
-name: CI Pipeline
+name: Build and Push Docker Image to ECR
 
 on:
   push:
@@ -9,14 +9,35 @@ jobs:
   docker-build:
     runs-on: ubuntu-latest
 
+    env:
+      AWS_REGION: eu-west-2
+      ECR_REPOSITORY: platform-engineering-cicd
+      ECR_REGISTRY: 044854092896.dkr.ecr.eu-west-2.amazonaws.com
+
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
       - name: Build Docker Image
         run: |
-          docker build -t platform-engineering-cicd .
+          docker build -t $ECR_REPOSITORY .
 
-      - name: Verify Docker Image
+      - name: Tag Docker Image
         run: |
-          docker images
+          docker tag $ECR_REPOSITORY:latest \
+          $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+      - name: Push Docker Image to ECR
+        run: |
+          docker push \
+          $ECR_REGISTRY/$ECR_REPOSITORY:latest
