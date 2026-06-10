@@ -1,4 +1,8 @@
-## Current CI/CD Workflow
+## CI/CD Pipeline
+
+This project demonstrates an automated CI/CD workflow using GitHub Actions and Amazon ECR.
+
+### Pipeline Flow
 
 Developer
 ↓
@@ -6,15 +10,21 @@ Git Push
 ↓
 GitHub Actions
 ↓
-Docker Build
+Docker Image Build
 ↓
-Docker Validation
+Amazon ECR Authentication
+↓
+Docker Image Push
+↓
+Amazon ECR
 
-## Skills Demonstrated
+### Skills Demonstrated
 
 * GitHub Actions
-* Continuous Integration (CI)
-* Docker Image Builds
-* Automation
-* Git & GitHub Workflows
-* Platform Engineering Fundamentals
+* Docker
+* Amazon ECR
+* AWS IAM
+* Secrets Management
+* Continuous Integration
+* Continuous Delivery
+* Platform Engineering
