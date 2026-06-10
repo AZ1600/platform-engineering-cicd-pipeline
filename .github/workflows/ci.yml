@@ -6,12 +6,17 @@ on:
       - main
 
 jobs:
-  build:
+  docker-build:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Display Message
-        run: echo "GitHub Actions CI Pipeline Running Successfully"
+      - name: Build Docker Image
+        run: |
+          docker build -t platform-engineering-cicd .
+
+      - name: Verify Docker Image
+        run: |
+          docker images
