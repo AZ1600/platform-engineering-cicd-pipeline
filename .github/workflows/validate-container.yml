@@ -24,6 +24,19 @@ jobs:
       - name: Build container image
         run: docker build --tag platform-cicd:test .
 
+      - name: Scan container image for vulnerabilities
+        run: |
+          docker run --rm \
+            --volume /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:0.73.0@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c \
+            image \
+            --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --exit-code 1 \
+            --skip-version-check \
+            platform-cicd:test
+
       - name: Verify container runs as non-root
         run: |
           test "$(docker run --rm platform-cicd:test id -u)" = "101"
@@ -55,8 +68,8 @@ jobs:
 
       - name: Show container logs after failure
         if: failure()
-        run: docker logs platform-cicd-test
+        run: docker logs platform-cicd-test 2>/dev/null || true
 
       - name: Remove test container
         if: always()
-        run: docker rm --force platform-cicd-test
+        run: docker rm --force platform-cicd-test 2>/dev/null || true
