@@ -24,12 +24,21 @@ jobs:
       - name: Build container image
         run: docker build --tag platform-cicd:test .
 
-      - name: Start test container
+      - name: Verify container runs as non-root
+        run: |
+          test "$(docker run --rm platform-cicd:test id -u)" = "101"
+          test "$(docker run --rm platform-cicd:test id -g)" = "101"
+
+      - name: Start hardened test container
         run: |
           docker run \
             --detach \
             --name platform-cicd-test \
-            --publish 8080:80 \
+            --publish 8080:8080 \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            --tmpfs /tmp:rw,noexec,nosuid,size=16m \
             platform-cicd:test
 
       - name: Verify application response
