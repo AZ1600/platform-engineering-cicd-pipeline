@@ -1,127 +1,84 @@
 # Platform Engineering CI/CD Pipeline
 
+[![Validate container](https://github.com/AZ1600/platform-engineering-cicd-pipeline/actions/workflows/validate-container.yml/badge.svg)](https://github.com/AZ1600/platform-engineering-cicd-pipeline/actions/workflows/validate-container.yml)
+
 ## Overview
 
-This project demonstrates a cloud-native CI/CD pipeline built using GitHub Actions, Docker, Amazon Elastic Container Registry (ECR), and AWS Identity and Access Management (IAM).
+This project demonstrates a secure container CI/CD workflow built with GitHub Actions, Docker, Hadolint, Trivy, Amazon Elastic Container Registry (ECR), and AWS Identity and Access Management (IAM).
 
-The pipeline automatically builds Docker container images and pushes them to Amazon ECR whenever code is pushed to the main branch.
+Every pull request is validated before it can be merged into the protected `main` branch. The workflow lints the Dockerfile, builds the image, scans it for vulnerabilities, verifies that it runs as a non-root user, starts it with additional runtime restrictions, and performs an HTTP smoke test.
 
-This project was created to demonstrate Platform Engineering, DevOps, Cloud Engineering, and Infrastructure Automation concepts commonly used in modern software delivery environments.
-
----
+Publishing to Amazon ECR is currently a separate, manually triggered workflow. This allows pull-request validation to run without AWS access while preventing failed or accidental publishing attempts.
 
 ## Architecture
 
-Developer
-↓
-Git Push
-↓
-GitHub Actions
-↓
-Docker Image Build
-↓
-AWS Authentication
-↓
-Amazon ECR Login
-↓
-Docker Image Push
-↓
-Amazon ECR Repository
+```mermaid
+flowchart LR
+    DEV["Developer"] --> BRANCH["Feature branch"]
+    BRANCH --> PR["Pull request"]
+    PR --> CI["GitHub Actions validation"]
+    CI --> PROTECTED["Protected main branch"]
+    PROTECTED --> MANUAL["Manual publish workflow"]
+    MANUAL --> ECR["Amazon ECR"]
 
----
+    CI --> LINT["Hadolint"]
+    CI --> BUILD["Docker build"]
+    CI --> SCAN["Trivy scan"]
+    CI --> SECURITY["Non-root security test"]
+    CI --> SMOKE["HTTP smoke test"]
+```
 
-## Technologies Used
+## CI/CD Flow
 
-* GitHub Actions
-* Docker
-* Amazon ECR
-* AWS IAM
-* Git
-* GitHub
-* Linux
+### Pull-request validation
 
----
+The workflow in `.github/workflows/validate-container.yml` runs for pull requests and can also be started manually.
 
-## Features
+It performs the following checks:
 
-* Automated CI/CD pipeline
-* Docker image creation
-* Secure AWS authentication using GitHub Secrets
-* Amazon ECR integration
-* Automated container image publishing
-* Infrastructure automation principles
+1. Checks out the repository with a commit-pinned GitHub Action.
+2. Lints the Dockerfile using Hadolint.
+3. Builds the container image.
+4. Scans the image with Trivy.
+5. Blocks the workflow when fixed `HIGH` or `CRITICAL` vulnerabilities are detected.
+6. Confirms that the image uses UID and GID `101`.
+7. Starts the container with a read-only filesystem.
+8. Drops all Linux capabilities.
+9. Enables `no-new-privileges`.
+10. Provides a restricted temporary filesystem.
+11. Sends an HTTP request and verifies the expected application response.
+12. Collects container logs after runtime failures.
+13. Removes the test container even when a previous step fails.
 
----
+### ECR publishing
 
-## CI/CD Workflow
+The workflow in `.github/workflows/ci.yml` publishes the image to Amazon ECR only when manually triggered with `workflow_dispatch`.
 
-The GitHub Actions workflow performs the following tasks:
+AWS access is not required for pull-request validation. Valid AWS configuration is required only when the ECR publishing workflow is started.
 
-1. Checks out the repository source code.
-2. Authenticates with AWS using GitHub Secrets.
-3. Logs into Amazon Elastic Container Registry (ECR).
-4. Builds a Docker image from the Dockerfile.
-5. Tags the Docker image.
-6. Pushes the image to Amazon ECR automatically.
+## Security Controls
 
----
+The project applies multiple build-time and runtime controls:
 
-## AWS Services Used
+- Protected `main` branch
+- Pull-request validation before merging
+- Minimal GitHub Actions permissions
+- Commit-pinned external GitHub Action
+- Digest-pinned Hadolint image
+- Digest-pinned Trivy image
+- Digest-pinned NGINX base image
+- Non-root NGINX process using UID and GID `101`
+- Read-only container filesystem during testing
+- All Linux capabilities removed
+- `no-new-privileges` enabled
+- Restricted memory-backed `/tmp`
+- HIGH and CRITICAL vulnerability blocking
+- Limited Docker build context through `.dockerignore`
+- Manual separation of AWS publishing from pull-request CI
 
-### Amazon ECR
+## Container Hardening
 
-Stores Docker container images for deployment.
+The Docker image uses the official unprivileged NGINX image and serves the application on port `8080`.
 
-### AWS IAM
-
-Provides secure authentication and authorization for GitHub Actions.
-
----
-
-## Skills Demonstrated
-
-* Continuous Integration (CI)
-* Continuous Delivery (CD)
-* GitHub Actions
-* Docker
-* Amazon ECR
-* AWS IAM
-* Secrets Management
-* Platform Engineering
-* DevOps Practices
-* Cloud Automation
-
----
-
-## Screenshots
-
-### GitHub Actions Pipeline Success
-
-![GitHub Actions Pipeline](docs/screenshots/github-actions-success.png)
-
-### Amazon ECR Repository
-
-![Amazon ECR Repository](docs/screenshots/ecr-image.png)
-
----
-
-## Future Enhancements
-
-* Deploy Docker images directly to Amazon EKS
-* Kubernetes deployment automation
-* Infrastructure provisioning using Terraform
-* Monitoring and observability integration
-* Automated testing stages
-* Multi-environment deployments
-
----
-
-## Author
-
-Olawale Azeez
-
-AWS Certified Solutions Architect – Associate
-
-AWS Certified Cloud Practitioner
-
-Aspiring Platform Engineer | Cloud Engineer | DevOps Engineer
+```dockerfile
+FROM nginxinc/nginx-unprivileged:1.30.4-alpine@sha256:44e36330f74d4f3a1d4e222acca9e23b401fb87811a7597024502bb759c4dd49
