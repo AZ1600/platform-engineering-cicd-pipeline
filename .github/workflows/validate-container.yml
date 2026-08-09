@@ -1,0 +1,53 @@
+name: Validate container
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: container-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Build and test container
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Build container image
+        run: docker build --tag platform-cicd:test .
+
+      - name: Start test container
+        run: |
+          docker run \
+            --detach \
+            --name platform-cicd-test \
+            --publish 8080:80 \
+            platform-cicd:test
+
+      - name: Verify application response
+        run: |
+          curl \
+            --fail \
+            --silent \
+            --show-error \
+            --retry 10 \
+            --retry-delay 2 \
+            --retry-all-errors \
+            http://localhost:8080 |
+          grep --fixed-strings "Platform Engineering CI/CD Pipeline"
+
+      - name: Show container logs after failure
+        if: failure()
+        run: docker logs platform-cicd-test
+
+      - name: Remove test container
+        if: always()
+        run: docker rm --force platform-cicd-test
