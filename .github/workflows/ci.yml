@@ -1,9 +1,14 @@
-name: Build and Push Docker Image to ECR
+name: Publish Docker image to ECR
 
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ecr-publish
+  cancel-in-progress: false
 
 jobs:
   docker-build:
