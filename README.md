@@ -271,9 +271,8 @@ The repository includes evidence of a previously published container image in Am
 ## Author
 
 Olawale Azeez
-
+AWS Certified Developer
 AWS Certified Solutions Architect – Associate
-
 AWS Certified Cloud Practitioner
 
 Aspiring Platform Engineer | Cloud Engineer | DevOps Engineer
