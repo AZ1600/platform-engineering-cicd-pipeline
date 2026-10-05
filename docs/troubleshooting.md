@@ -1,12 +1,17 @@
 # Troubleshooting Guide
 
 This document records real issues encountered while improving the
-`platform-engineering-cicd-pipeline` project, including what failed,
-why it failed, how the issue was diagnosed, how it was fixed, and why
-the final fix works.
+`platform-engineering-cicd-pipeline` project.
 
-The goal is not only to record the solution, but to understand the
-reasoning behind it.
+For each issue, the goal is to capture:
+
+- what failed
+- what evidence was observed
+- how the problem was diagnosed
+- the root cause
+- how it was fixed
+- why the fix works
+- what engineering lesson can be reused elsewhere
 
 ---
 
@@ -27,46 +32,36 @@ returned:
 
 The repository had already been cloned locally.
 
-GitHub CLI will not overwrite an existing non-empty directory because
-doing so could destroy local files or uncommitted work.
+GitHub CLI does not overwrite an existing non-empty directory because doing so
+could destroy local files or uncommitted work.
 
 ### Diagnosis
 
-The existing project directory was already present on the machine.
-
-Instead of cloning again, the existing Git repository could be reused.
-
-### Resolution
-
-The existing clone was opened and synchronized with GitHub:
+The existing repository was opened directly and checked with Git:
 
     cd ~/platform-engineering-cicd-pipeline
+
     git checkout main
     git pull --ff-only
     git status
 
-Git reported:
+Git reported that the local branch was synchronized with `origin/main`.
 
-    On branch main
-    Your branch is up to date with 'origin/main'.
+### Resolution
 
-    nothing to commit, working tree clean
+The existing clone was reused rather than cloning another copy.
 
 ### Why This Works
 
-`git pull --ff-only` updates the local branch only when Git can move the
-branch pointer directly forward to the remote commit.
+`git pull --ff-only` updates the branch only when Git can move it directly
+forward without creating an unexpected merge commit.
 
-It does not create an unexpected merge commit.
-
-The clean `git status` output confirmed that the repository was in a safe
-state before starting new work.
+A clean working tree provides a safe starting point for new work.
 
 ### Lesson
 
-Before cloning a repository, check whether it already exists locally.
-
-If it does, synchronize the existing clone instead of creating another one.
+Before cloning a repository, first determine whether a local copy already
+exists.
 
 ---
 
@@ -74,64 +69,50 @@ If it does, synchronize the existing clone instead of creating another one.
 
 ### Symptom
 
-The following command was used to inspect the ECR repository:
+Running:
 
     aws ecr describe-repositories \
       --repository-names platform-engineering-cicd \
       --region eu-west-2 \
       --profile one-piece-new
 
-AWS returned:
+returned:
 
     RepositoryNotFoundException
 
-The message stated that the repository did not exist in registry:
+AWS reported that the repository did not exist in registry:
 
     808101329332
 
 ### Diagnosis
 
-The active AWS identity was checked using:
+The current AWS identity was checked:
 
     aws sts get-caller-identity \
       --profile one-piece-new
 
-The command showed that the current AWS account was:
+The active AWS account was:
 
     808101329332
 
-The GitHub Actions workflow was then inspected.
+The GitHub Actions workflow contained:
 
-It still contained:
+    044854092896.dkr.ecr.eu-west-2.amazonaws.com
 
-    ECR_REGISTRY: 044854092896.dkr.ecr.eu-west-2.amazonaws.com
-
-The workflow therefore referenced a different AWS account:
-
-    Old workflow account: 044854092896
-    Current AWS account: 808101329332
-
-A repository search in the current account also showed that
-`platform-engineering-cicd` did not yet exist there.
+The account IDs did not match.
 
 ### Root Cause
 
-The CI/CD workflow contained stale account-specific configuration from an
-older AWS environment.
+The workflow contained stale account-specific configuration from an older AWS
+environment.
 
-Amazon ECR repositories are scoped to an AWS account and AWS region.
+Amazon ECR repositories are scoped by:
 
-A repository named:
+    AWS account
+    AWS region
+    repository name
 
-    platform-engineering-cicd
-
-in account:
-
-    044854092896
-
-is a different resource from a repository with the same name in account:
-
-    808101329332
+A repository with the same name in another AWS account is a different resource.
 
 ### Resolution
 
@@ -149,40 +130,31 @@ The resulting repository was:
 
     808101329332.dkr.ecr.eu-west-2.amazonaws.com/platform-engineering-cicd
 
-The repository was configured with:
+It was configured with:
 
+    Region: eu-west-2
     Tag mutability: IMMUTABLE
     Scan on push: enabled
     Encryption: AES256
-    Region: eu-west-2
-
-The GitHub Actions workflow was also changed so that the ECR registry is
-no longer hard-coded.
-
-Instead, the registry is obtained from the Amazon ECR login action.
 
 ### Why This Works
 
-The GitHub workflow now authenticates to the current AWS account and receives
-the correct ECR registry directly from AWS.
+The repository now exists in the AWS account actually being used by the
+pipeline.
 
-This removes the dependency on a manually hard-coded AWS account ID.
-
-The workflow is therefore less likely to silently reference an old AWS account
-in the future.
+The workflow was also changed so the registry is discovered dynamically rather
+than being hard-coded.
 
 ### Lesson
 
-When an AWS resource cannot be found, do not assume the resource name is wrong.
+When an AWS resource appears to be missing, verify:
 
-First verify:
-
-    AWS account
-    AWS region
+    account
+    region
+    active CLI profile
     resource name
-    active AWS CLI profile
 
-AWS resource identity depends on more than the resource name alone.
+before assuming the resource itself is broken.
 
 ---
 
@@ -190,55 +162,46 @@ AWS resource identity depends on more than the resource name alone.
 
 ### Investigation
 
-Before creating a new GitHub OIDC provider, the AWS account was inspected:
+Before creating a GitHub OIDC provider, the current AWS account was inspected:
 
     aws iam list-open-id-connect-providers \
       --profile one-piece-new
 
-The account already contained:
+An existing provider was found:
 
     arn:aws:iam::808101329332:oidc-provider/token.actions.githubusercontent.com
 
-The provider configuration was then inspected:
+It was inspected with:
 
     aws iam get-open-id-connect-provider \
       --open-id-connect-provider-arn \
       arn:aws:iam::808101329332:oidc-provider/token.actions.githubusercontent.com \
       --profile one-piece-new
 
-The provider contained:
+The provider used:
 
-    Url:
     token.actions.githubusercontent.com
 
-    ClientIDList:
+with audience:
+
     sts.amazonaws.com
 
 ### Decision
-
-A second GitHub OIDC provider was not created.
 
 The existing provider was reused.
 
 ### Why This Matters
 
-There should not be unnecessary duplicate identity infrastructure.
+Creating unnecessary duplicate identity infrastructure can cause:
 
-Checking existing state before provisioning new resources prevents:
-
-    duplicate configuration
-    unnecessary IAM objects
     confusing trust relationships
-    harder future troubleshooting
+    duplicated configuration
+    harder troubleshooting
+    unnecessary IAM resources
 
 ### Lesson
 
-Infrastructure work should begin with discovery of current state.
-
-Do not create a resource simply because a tutorial or command sequence says
-to create one.
-
-First determine whether it already exists.
+Inspect existing infrastructure before provisioning new infrastructure.
 
 ---
 
@@ -246,32 +209,29 @@ First determine whether it already exists.
 
 ### Previous Approach
 
-The original GitHub Actions workflow authenticated to AWS using:
+The workflow originally used:
 
-    aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-    aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+    AWS_ACCESS_KEY_ID
+    AWS_SECRET_ACCESS_KEY
 
-These values were stored as GitHub repository secrets.
+stored as GitHub repository secrets.
 
 ### Problem
 
-AWS access keys are long-lived credentials.
+Access keys are long-lived credentials.
 
-If they are exposed, they remain valid until they are explicitly disabled,
-deleted, or rotated.
-
-They also create an ongoing credential-management responsibility.
+If exposed, they remain usable until manually rotated, disabled, or deleted.
 
 ### New Approach
 
-The workflow now uses GitHub OpenID Connect.
+The publishing workflow now uses GitHub OpenID Connect.
 
 The authentication flow is:
 
     GitHub Actions
           |
           v
-    GitHub OIDC identity token
+    GitHub OIDC token
           |
           v
     AWS IAM trust policy
@@ -280,44 +240,33 @@ The authentication flow is:
     STS AssumeRoleWithWebIdentity
           |
           v
-    Temporary AWS credentials
+    temporary AWS credentials
           |
           v
     Amazon ECR
 
-The workflow now has:
+The workflow requests:
 
     permissions:
       contents: read
       id-token: write
 
-and uses:
+and assumes:
 
-    role-to-assume:
-      arn:aws:iam::808101329332:role/GitHubActionsPlatformCicdEcrPublisher
-
-### What `id-token: write` Means
-
-This permission allows GitHub Actions to request an OIDC identity token for
-the workflow.
-
-It does not mean the workflow can arbitrarily modify repository content.
-
-The token contains identity claims that AWS can verify.
+    arn:aws:iam::808101329332:role/GitHubActionsPlatformCicdEcrPublisher
 
 ### Why This Is Safer
 
-No permanent AWS access key needs to be stored in GitHub.
+No permanent AWS credential needs to be stored in GitHub.
 
-AWS STS issues temporary credentials that expire automatically.
+AWS STS credentials expire automatically.
 
-The IAM role can also restrict which GitHub repository and branch are allowed
-to request those credentials.
+The IAM trust relationship can also restrict exactly which GitHub repository
+and branch are allowed to assume the role.
 
 ### Lesson
 
-Where supported, workload identity should be preferred over stored cloud
-credentials.
+Prefer short-lived workload identity over stored cloud credentials.
 
 ---
 
@@ -325,34 +274,27 @@ credentials.
 
 ### Trust Policy
 
-The IAM role uses a trust condition containing:
+The IAM role trust policy restricts the GitHub identity to:
 
     repo:AZ1600/platform-engineering-cicd-pipeline:ref:refs/heads/main
 
-The expected OIDC audience is:
+The OIDC audience is:
 
     sts.amazonaws.com
 
 ### Meaning
 
-AWS will allow the role to be assumed only when the GitHub OIDC token matches
-the configured repository and branch.
-
-The trust decision is conceptually:
+The trust policy answers:
 
     WHO may become this IAM role?
 
-The trust policy answers that question.
+Only a workflow from the intended repository and `main` branch should satisfy
+the trust condition.
 
-### Why Main Is Restricted
+### Why This Matters
 
-The ECR publishing workflow is intended to publish trusted artifacts.
-
-Allowing arbitrary feature branches to assume the production publishing role
-would weaken that boundary.
-
-The feature branch can develop and validate the workflow, but the real ECR
-publishing path should execute from `main`.
+Feature branches should not automatically receive permission to publish trusted
+artifacts to the production ECR repository.
 
 ### Important Distinction
 
@@ -362,9 +304,9 @@ IAM trust policy:
 
 IAM permissions policy:
 
-    WHAT can the role do after it has been assumed?
+    WHAT can the role do after assumption?
 
-Both layers are needed.
+Both controls are required.
 
 ---
 
@@ -372,10 +314,14 @@ Both layers are needed.
 
 ### Requirement
 
-The GitHub Actions role needs to authenticate to ECR and upload container
-layers.
+The GitHub Actions publishing role needs permission to:
 
-It does not need broad administrative AWS access.
+- authenticate to Amazon ECR
+- upload image layers
+- publish an image manifest
+- later retrieve the stored image digest
+
+It does not require broad AWS administrative access.
 
 ### Authorization Token Permission
 
@@ -387,53 +333,32 @@ with:
 
     Resource: "*"
 
-### Why Resource Is `*`
+This action cannot be restricted to an individual ECR repository.
 
-`ecr:GetAuthorizationToken` does not support repository-level resource
-restriction.
+### Repository-Scoped Permissions
 
-AWS therefore requires this action to use:
-
-    Resource: "*"
-
-This does not grant permission to publish images everywhere.
-
-### Repository-Specific Permissions
-
-The actual upload permissions are restricted to:
+The actual ECR operations are restricted to:
 
     arn:aws:ecr:eu-west-2:808101329332:repository/platform-engineering-cicd
 
-The allowed actions are:
+The publishing actions include:
 
     ecr:BatchCheckLayerAvailability
     ecr:CompleteLayerUpload
+    ecr:DescribeImages
     ecr:InitiateLayerUpload
     ecr:PutImage
     ecr:UploadLayerPart
 
-### Security Boundary
+### Why This Is Least Privilege
 
-The resulting authorization model is:
-
-    GitHub repository
-          |
-          v
-    main branch
-          |
-          v
-    GitHub OIDC
-          |
-          v
-    IAM publishing role
-          |
-          v
-    one ECR repository
+The role can authenticate to ECR but can only publish and inspect image
+metadata for the intended repository.
 
 ### Lesson
 
-Least privilege means granting the workflow the actions it actually requires
-against the smallest practical resource scope.
+Grant only the actions required and scope them to the smallest practical
+resource boundary.
 
 ---
 
@@ -445,87 +370,79 @@ The workflow contained:
 
     ECR_REGISTRY: 044854092896.dkr.ecr.eu-west-2.amazonaws.com
 
-This tied the workflow directly to a specific AWS account.
-
 ### Problem
 
-When the active AWS account changed, this value became stale.
+This tied the workflow directly to an old AWS account.
 
-The workflow continued to point toward the old account.
+When the AWS account changed, the workflow silently retained stale
+configuration.
 
 ### New Configuration
 
-The Amazon ECR login action now has an ID:
+The workflow uses the output from:
 
-    - name: Login to Amazon ECR
-      id: login-ecr
-      uses: aws-actions/amazon-ecr-login@v2
+    aws-actions/amazon-ecr-login
 
-The registry is obtained using:
+The registry is obtained through:
 
-    ${{ steps.login-ecr.outputs.registry }}
+    steps.login-ecr.outputs.registry
 
 ### Why This Works
 
 The registry value comes from the AWS account that the workflow actually
 authenticated to.
 
-This removes duplicated account-specific configuration and reduces the risk
-of configuration drift.
-
 ### Lesson
 
-Prefer dynamically discovered infrastructure values when a trusted tool can
-provide them reliably.
-
-Avoid hard-coding cloud account information when it can be derived from the
-authenticated environment.
+Prefer deriving cloud resource identifiers from authenticated runtime context
+rather than duplicating account-specific configuration.
 
 ---
 
-## 8. Replacing the `latest` Image Tag With the Git Commit SHA
+## 8. Replacing `latest` With Git Commit SHA Tags
 
 ### Previous Approach
 
-The container image was published as:
+Images were published using:
 
-    platform-engineering-cicd:latest
+    latest
 
 ### Problem
 
-`latest` does not identify which Git commit produced the image.
+`latest` does not identify which source revision produced an image.
 
-It can also move over time.
-
-That makes incident investigation and deployment traceability harder.
+It can also change over time.
 
 ### New Approach
 
-The workflow now uses:
+The workflow uses:
 
-    IMAGE_TAG: ${{ github.sha }}
+    ${{ github.sha }}
 
-An image therefore receives a tag corresponding to the Git commit that built it.
+For example:
 
-Conceptually:
-
-    Git commit
-         |
-         v
-    GitHub Actions workflow
-         |
-         v
-    Docker image
-         |
-         v
-    ECR image tagged with commit SHA
+    ebdc23381190227e46d84259be746b106c33b19c
 
 ### Why This Works
 
-The Git commit SHA is a unique identifier for the source revision used by the
-workflow.
+The image tag now identifies the exact Git commit that produced the artifact.
 
-This allows engineers to trace an ECR image back to the code that produced it.
+The traceability path becomes:
+
+    Git commit
+        |
+        v
+    GitHub Actions run
+        |
+        v
+    container image
+        |
+        v
+    ECR image tag
+
+### Lesson
+
+Use immutable, traceable identifiers for release artifacts.
 
 ---
 
@@ -539,40 +456,21 @@ The repository was created with:
 
 ### Meaning
 
-After an image tag has been published, another image cannot overwrite that
-same tag.
+Once an image tag has been published, a different image cannot later replace
+the same tag.
 
 ### Why This Matters
 
-Suppose an image is published using commit:
+If a tag representing a Git commit could be overwritten, the relationship
+between source and artifact would no longer be trustworthy.
 
-    abc123
-
-Without immutable tags, another image could theoretically later be pushed using:
-
-    abc123
-
-even if the image contents were different.
-
-That would break the relationship between source revision and artifact.
-
-Immutable tags protect the relationship:
-
-    commit SHA
-        =
-    specific container artifact
-
-### Combined With SHA Tags
-
-Using both:
+Using:
 
     Git commit SHA tags
     +
     ECR immutable tags
 
-provides much stronger artifact traceability than:
-
-    latest
+creates a stronger relationship between source revision and container artifact.
 
 ---
 
@@ -580,40 +478,36 @@ provides much stronger artifact traceability than:
 
 ### Configuration
 
-The ECR repository was created with:
+The ECR repository uses:
 
-    --image-scanning-configuration scanOnPush=true
+    scanOnPush=true
 
 ### Purpose
 
-Amazon ECR automatically initiates an image vulnerability scan when a new image
-is pushed.
+ECR performs registry-side vulnerability scanning after an image is uploaded.
 
-### Why This Is Useful
+### Relationship to CI Scanning
 
-The CI pipeline already performs Trivy container scanning before publication.
+The pipeline also performs Trivy scanning before publication.
 
-ECR scan-on-push provides an additional registry-side security signal after the
-artifact reaches AWS.
+The controls operate at different stages:
 
-These controls operate at different points:
-
-    CI security scan
-          |
-          v
-    image publication
-          |
-          v
-    ECR registry scan
+    CI Trivy scan
+        |
+        v
+    publish image
+        |
+        v
+    ECR scan on push
 
 ### Lesson
 
-Security checks are stronger when they exist at multiple stages of the software
-delivery lifecycle.
+Layering security checks provides better coverage than depending on a single
+scanner or stage.
 
 ---
 
-## 11. Verifying That Stale Credentials and Registry References Were Removed
+## 11. Verifying Stale AWS References Were Removed
 
 ### Verification
 
@@ -636,92 +530,27 @@ The check returned:
 
     No stale AWS credential, registry, or latest-tag references found
 
-### Why This Check Matters
+### Important Git Detail
 
-Changing the visible workflow is not enough if stale references remain elsewhere.
-
-Searching the repository verifies that the old authentication and registry
-configuration has actually been removed from the relevant workflow files.
-
-### Git Diff Detail
-
-Old values may still appear in:
+Deleted values can still appear in red inside:
 
     git diff
 
-as red deleted lines.
+because a diff shows historical lines being removed.
 
-That does not mean those values still exist in the current file.
-
-A Git diff shows both:
-
-    removed content
-    added content
-
-The repository search checks the actual current files.
+That does not mean the value still exists in the current file.
 
 ### Lesson
 
-Understand the difference between historical diff output and the current
-working-tree content.
+Differentiate between:
 
----
+    current working-tree contents
 
-# Current Secure Publishing Model
+and:
 
-The resulting publishing flow is:
+    historical diff output
 
-    Developer
-        |
-        v
-    Git commit on main
-        |
-        v
-    Manual GitHub Actions publish workflow
-        |
-        v
-    GitHub OIDC token
-        |
-        v
-    AWS IAM trust validation
-        |
-        v
-    Temporary STS credentials
-        |
-        v
-    Amazon ECR login
-        |
-        v
-    Docker build
-        |
-        v
-    Commit-SHA image tag
-        |
-        v
-    Push to dedicated ECR repository
-        |
-        v
-    Immutable artifact + ECR scan on push
-
-The design avoids stored AWS access keys and limits the publishing identity to
-the required repository, branch, AWS role, AWS region, and ECR repository.
-
----
-
-# General Troubleshooting Principles Learned
-
-Several reusable engineering lessons came from this work:
-
-1. Inspect existing state before creating new infrastructure.
-2. Verify the active AWS account and region before diagnosing missing resources.
-3. Separate authentication, trust, authorization, and resource existence.
-4. Prefer short-lived workload identity over stored cloud credentials.
-5. Avoid unnecessary hard-coded account-specific values.
-6. Use least-privilege IAM permissions.
-7. Use immutable, traceable artifact identifiers instead of moving tags.
-8. Validate assumptions with commands rather than relying on configuration alone.
-9. Preserve troubleshooting knowledge so failures become reusable engineering lessons.
-10. Understand why a fix works instead of stopping when the error disappears.
+when validating configuration cleanup.
 
 ---
 
@@ -729,237 +558,155 @@ Several reusable engineering lessons came from this work:
 
 ### Symptom
 
-The pull-request validation workflow failed at:
+Pull-request validation failed at:
 
     Scan container image for vulnerabilities
 
-The earlier steps passed:
+Earlier steps passed:
 
     Dockerfile lint
     Docker image build
 
-but Trivy exited with status code 1.
-
-The remaining runtime checks were skipped because the vulnerability gate had
-already failed.
+Trivy exited with code `1`.
 
 ### CI Security Policy
 
-The workflow scans the container using:
+The workflow scans using:
 
     --severity HIGH,CRITICAL
     --ignore-unfixed
     --exit-code 1
 
-This means the workflow fails when Trivy detects HIGH or CRITICAL
-vulnerabilities that have known fixes.
-
-Unfixed findings are ignored by this particular gate.
+This means fixed HIGH or CRITICAL vulnerabilities block the workflow.
 
 ### Diagnosis
 
-The failure was reproduced locally using the same Trivy image and security
-policy used by GitHub Actions.
+The same Trivy scan was reproduced locally.
 
-The scan reported vulnerabilities in operating-system packages provided by the
-container base image, including packages such as:
+The findings came from operating-system packages inherited from the container
+base image, including packages such as:
 
     util-linux
     pcre2
 
-The application code itself was not the source of these findings.
+The application code itself was not the source.
 
-The Dockerfile used a digest-pinned version of:
+The Dockerfile used:
 
     nginxinc/nginx-unprivileged:1.30.4-alpine
 
-Digest pinning made the build reproducible, but it also meant the image did not
-automatically receive newer Alpine security fixes.
+pinned by digest.
 
 ### Root Cause
 
-The pinned NGINX/Alpine base image had become stale relative to current
-vulnerability intelligence and available patched packages.
+Digest pinning freezes the exact dependency tree.
 
-This demonstrates an important property of immutable dependency pinning:
+That provides reproducibility, but it also means security patches are not
+automatically received.
 
-    reproducibility does not automatically provide security updates
-
-A digest-pinned image stays exactly the same until an engineer deliberately
-updates it.
+The pinned NGINX/Alpine image had become stale relative to current
+vulnerability intelligence and patched upstream packages.
 
 ### Investigation
 
-A newer official unprivileged NGINX image was inspected:
+A newer official image was tested:
 
     nginxinc/nginx-unprivileged:1.30.5-alpine3.24
 
-The image was scanned independently with the same Trivy policy before changing
-the application Dockerfile.
+It was scanned independently using the same Trivy policy.
 
 The result was:
 
     Vulnerabilities: 0
 
-for the HIGH and CRITICAL vulnerability gate.
-
-This proved that refreshing the base image was an appropriate remediation
-before changing the project itself.
+for the blocking HIGH/CRITICAL gate.
 
 ### Resolution
 
-The Dockerfile base image was updated from the older digest-pinned NGINX image
-to the newer official:
+The Dockerfile was updated to the newer official image and pinned to its
+multi-platform digest.
 
-    nginxinc/nginx-unprivileged:1.30.5-alpine3.24
-
-The newer image was also pinned by digest so builds remain reproducible.
-
-The application image was then rebuilt locally.
+The application image was rebuilt.
 
 ### Security Validation
 
-The rebuilt project image was scanned using the same command used by CI.
+The rebuilt project image produced:
 
-The result was:
-
-    Target: platform-cicd:test
     Vulnerabilities: 0
 
-The Trivy HIGH/CRITICAL security gate therefore passed.
+for the blocking Trivy policy.
 
 ### Runtime Validation
 
-Updating a base image can change runtime behaviour, so the security scan alone
-was not considered sufficient evidence.
-
-The configured container identity was verified:
+The updated image was also checked for runtime compatibility:
 
     UID 101 verified
     GID 101 verified
 
-The application was then started using the same hardened runtime restrictions
-used by CI:
+It was started with:
 
-    read-only filesystem
-    all Linux capabilities dropped
-    no-new-privileges enabled
-    restricted tmpfs mounted at /tmp
+    read-only root filesystem
+    cap-drop ALL
+    no-new-privileges
+    restricted tmpfs
 
-The container started successfully.
+The application remained operational.
 
-### Application Validation
+### Smoke Test
 
-An HTTP smoke test was performed against:
-
-    http://localhost:8080
-
-The expected application content was returned:
+The HTTP endpoint returned:
 
     Platform Engineering CI/CD Pipeline
 
-The final result was:
+and:
 
     Application smoke test passed
 
-### Why This Fix Works
-
-The newer upstream image contains patched operating-system packages while
-preserving the unprivileged NGINX runtime model required by the application.
-
-The fix therefore removes the vulnerable dependency versions without weakening
-the vulnerability policy.
-
-The complete validation path was:
-
-    refreshed trusted base image
-            |
-            v
-    rebuild application image
-            |
-            v
-    Trivy HIGH/CRITICAL scan
-            |
-            v
-    0 blocking vulnerabilities
-            |
-            v
-    verify UID/GID 101
-            |
-            v
-    hardened runtime test
-            |
-            v
-    HTTP smoke test
-            |
-            v
-    application validated
-
-### Why the Trivy Gate Was Not Disabled
+### Why the Security Gate Was Not Weakened
 
 The failure was not solved by:
 
+    disabling Trivy
     lowering severity
     removing --exit-code 1
     ignoring the CVEs
-    disabling vulnerability scanning
 
-The security gate was functioning correctly.
-
-Weakening the gate would have hidden the vulnerable dependency instead of
-removing it.
+The vulnerable dependency was replaced instead.
 
 ### Lesson
 
 Digest pinning and vulnerability scanning solve different problems.
 
-Digest pinning provides:
-
-    reproducibility
-    predictable dependencies
-    resistance to silent upstream image changes
-
-Vulnerability scanning provides:
-
-    awareness when those frozen dependencies become unsafe
-
-A secure software-supply-chain process therefore needs both:
+A secure process needs:
 
     pin dependencies
         +
-    continuously scan them
+    continuously scan dependencies
         +
-    deliberately refresh them when security fixes become available
+    deliberately refresh them when fixes become available
 
 ---
 
-## 13. ECR Push Succeeded but the Workflow Failed While Parsing the Image Digest
+## 13. ECR Push Succeeded but Workflow Failed While Parsing the Image Digest
 
 ### Symptom
 
-The post-merge publishing workflow successfully completed:
+The publishing workflow successfully completed:
 
-    Checkout repository
-    Configure AWS credentials with GitHub OIDC
-    Login to Amazon ECR
-    Build Docker image
-    Generate CycloneDX SBOM
-    Validate SBOM
-    Upload SBOM artifact
+    GitHub OIDC authentication
+    ECR login
+    Docker build
+    CycloneDX SBOM generation
+    SBOM validation
+    SBOM artifact upload
 
-The workflow then failed during:
+It then failed during:
 
     Push Docker image to Amazon ECR
 
-The GitHub Actions job ended with:
-
-    Process completed with exit code 1
-
-The provenance and SBOM attestation steps were skipped.
-
 ### Important Observation
 
-The container upload itself did not fail.
+The actual ECR push succeeded.
 
 Docker reported:
 
@@ -967,84 +714,55 @@ Docker reported:
     digest: sha256:e864467c713b29c2994fb4a9b2f6fde5f2c8fc161ece938915d28a5bcee7e153
     size: 2404
 
-This proved that Amazon ECR had already accepted the image.
+The workflow failed after publication while extracting the digest.
 
-The failure occurred after publication while the workflow attempted to extract
-the immutable digest.
+### Original Parsing Logic
 
-### Original Digest Parsing
-
-The workflow captured Docker output using:
+The workflow used:
 
     docker push "$IMAGE_URI" 2>&1 | tee push-output.txt
 
-and attempted to extract the digest using:
+and:
 
     awk '/digest:/ {print $2; exit}'
 
-The result was then validated against:
-
-    ^sha256:[0-9a-f]{64}$
-
 ### Root Cause
 
-The parsing logic assumed that Docker output would have this simplified form:
+The parser assumed:
 
     digest: sha256:<digest> size: <size>
 
-Under that assumption:
+but Docker actually returned:
 
-    $1 = digest:
-    $2 = sha256:<digest>
+    <git-sha>: digest: sha256:<digest> size: <size>
 
-The actual Docker output contained the image tag first:
-
-    <git-sha>: digest: sha256:<digest> size: 2404
-
-Therefore the fields were actually:
+Therefore:
 
     $1 = <git-sha>:
     $2 = digest:
     $3 = sha256:<digest>
-    $4 = size:
-    $5 = 2404
 
 The workflow extracted:
 
     digest:
 
-instead of:
+instead of the SHA-256 value.
 
-    sha256:e864467c713b29c2994fb4a9b2f6fde5f2c8fc161ece938915d28a5bcee7e153
+The digest validation correctly rejected the bad value.
 
-The SHA-256 validation correctly rejected that value.
+### Why `$3` Was Not Used as the Final Fix
 
-### Why Simply Changing `$2` to `$3` Was Not Chosen
+Changing `$2` to `$3` would have fixed this particular output format.
 
-Changing the parser to:
+However, the workflow would still depend on parsing human-readable Docker
+console output.
 
-    awk '/digest:/ {print $3; exit}'
+The digest is security-sensitive because it becomes the subject of artifact
+attestations.
 
-would fix this specific Docker output.
+### Stronger Resolution
 
-However, it would still make the supply-chain workflow dependent on the
-human-readable output format of the Docker CLI.
-
-The image digest is security-sensitive because it becomes the subject of:
-
-    build provenance attestation
-    SBOM attestation
-
-A stronger solution is to obtain that value from the registry that actually
-stored the image.
-
-### Resolution
-
-The workflow now performs the push normally:
-
-    docker push "$IMAGE_URI"
-
-After publication, it queries Amazon ECR directly:
+After pushing, the workflow now asks Amazon ECR directly:
 
     aws ecr describe-images \
       --repository-name "$ECR_REPOSITORY" \
@@ -1053,51 +771,30 @@ After publication, it queries Amazon ECR directly:
       --query 'imageDetails[0].imageDigest' \
       --output text
 
-The returned digest must match:
+The result must match:
 
-    sha256:<64 hexadecimal characters>
+    ^sha256:[0-9a-f]{64}$
 
-before it is written to the GitHub Actions outputs.
+before it is used.
 
 ### Eventual Consistency Handling
 
-The workflow retries the ECR lookup several times.
+The workflow retries the ECR lookup several times with short delays.
 
-This accounts for the possibility that the image push completes immediately
-before the repository metadata becomes available through the ECR API.
-
-The workflow waits briefly between attempts and only continues once a valid
-SHA-256 digest is returned.
+This protects against a short delay between the completed push and image
+metadata becoming queryable through the ECR API.
 
 ### IAM Change
 
-The GitHub publishing role previously contained only the permissions required
-to authenticate and upload image layers.
-
-The following read permission was added:
+The publishing role gained:
 
     ecr:DescribeImages
 
-It remains scoped to:
+scoped only to:
 
     arn:aws:ecr:eu-west-2:808101329332:repository/platform-engineering-cicd
 
-No broad ECR read or administrative permission was added.
-
-### Why This Fix Is Stronger
-
-The old flow was:
-
-    Docker push
-        |
-        v
-    human-readable CLI output
-        |
-        v
-    text parsing
-        |
-        v
-    image digest
+### Why This Fix Is Better
 
 The new flow is:
 
@@ -1118,28 +815,244 @@ The new flow is:
         v
     provenance and SBOM attestations
 
-The registry is the authoritative source for the digest of the stored artifact.
+### Important Side-Effect Lesson
 
-### Important Behaviour With Immutable Tags
+The GitHub job showed failure even though the image was already present in ECR.
 
-Although the GitHub Actions job failed, the image for the failed workflow had
-already been pushed successfully.
-
-Because the ECR repository uses immutable tags, rerunning the same publish
-workflow for the same Git commit would attempt to reuse an existing tag.
-
-The remediation is therefore committed as a new Git revision.
-
-After merge, the new main commit produces a new immutable ECR tag and the
-complete workflow can be tested safely.
+A failed automation job does not imply that all earlier external side effects
+were rolled back.
 
 ### Lesson
 
-A failed CI/CD job does not necessarily mean every earlier side effect was
-rolled back.
+For security-sensitive artifact metadata, prefer authoritative service APIs
+over parsing human-oriented command output.
 
-When debugging deployment or publishing workflows, determine exactly which
-step failed and inspect the external system before retrying.
+---
 
-For security-sensitive artifact metadata, prefer authoritative APIs over
-parsing human-oriented CLI output.
+## 14. `gh run list` Returned the Previous Workflow Run
+
+### Symptom
+
+A new publishing workflow was created successfully:
+
+    gh workflow run ci.yml --ref main
+
+GitHub immediately returned a new run ID:
+
+    37329944685
+
+A command was then used to rediscover the newest run:
+
+    gh run list \
+      --workflow=ci.yml \
+      --branch main \
+      --limit 1
+
+That query briefly returned the previous failed run:
+
+    37328465217
+
+The terminal therefore showed:
+
+    has already completed with 'failure'
+
+even though the newly created run was different.
+
+### Root Cause
+
+There was a short timing window between creating the workflow dispatch event
+and the new run becoming the first result returned by `gh run list`.
+
+The workflow itself was not failing.
+
+This was a run-discovery race.
+
+### Diagnosis
+
+The exact run ID printed by:
+
+    gh workflow run
+
+was used directly:
+
+    gh run watch 37329944685 --exit-status
+
+That returned:
+
+    completed with 'success'
+
+### Resolution
+
+For manually dispatched workflows, prefer the exact run ID or URL returned at
+creation time rather than immediately rediscovering it through a list query.
+
+### Lesson
+
+Automation tooling can have eventual-consistency behaviour too.
+
+When a command returns the exact identifier of a newly created resource, use
+that identifier directly.
+
+---
+
+## 15. Successful End-to-End SBOM and Provenance Validation
+
+### Final Workflow
+
+The completed publishing workflow ran from commit:
+
+    ebdc23381190227e46d84259be746b106c33b19c
+
+The complete workflow succeeded:
+
+    Checkout repository
+    Configure AWS credentials with GitHub OIDC
+    Login to Amazon ECR
+    Build Docker image
+    Generate CycloneDX SBOM
+    Validate SBOM
+    Upload SBOM artifact
+    Push Docker image to Amazon ECR
+    Generate build provenance attestation
+    Generate SBOM attestation
+
+### CycloneDX SBOM
+
+The generated SBOM was successfully validated and contained:
+
+    71 components
+
+The uploaded GitHub Actions artifact was named:
+
+    sbom-ebdc23381190227e46d84259be746b106c33b19c
+
+### Published Image Digest
+
+Amazon ECR reported the authoritative image digest:
+
+    sha256:2373ce5dd52054f67b2ee81eff4028c09daf7c092e85baedbbd5f1c47753b260
+
+### Build Provenance
+
+A build provenance attestation was created for:
+
+    808101329332.dkr.ecr.eu-west-2.amazonaws.com/platform-engineering-cicd@sha256:2373ce5dd52054f67b2ee81eff4028c09daf7c092e85baedbbd5f1c47753b260
+
+GitHub attestation ID:
+
+    52871120
+
+### SBOM Attestation
+
+An SBOM attestation was created for the same immutable image digest.
+
+GitHub attestation ID:
+
+    52871128
+
+### Signing
+
+The attestations were signed using the public Sigstore infrastructure.
+
+The signatures were also recorded in the Rekor transparency log.
+
+### What This Proves
+
+The project can now answer several separate supply-chain questions.
+
+Who authenticated to AWS?
+
+    A trusted GitHub Actions workflow using OIDC.
+
+What source revision produced the image?
+
+    The Git commit SHA used as the ECR image tag.
+
+What exact artifact was published?
+
+    The immutable ECR SHA-256 digest.
+
+What is inside the image?
+
+    The CycloneDX SBOM.
+
+Where did the artifact come from?
+
+    The build provenance attestation.
+
+Can the attestation be independently verified?
+
+    The signed GitHub attestation and transparency-log record provide evidence.
+
+---
+
+# Current Secure Publishing Model
+
+The final publishing path is:
+
+    Git commit on main
+            |
+            v
+    GitHub Actions
+            |
+            v
+    GitHub OIDC token
+            |
+            v
+    AWS IAM trust validation
+            |
+            v
+    AWS STS temporary credentials
+            |
+            v
+    Amazon ECR authentication
+            |
+            v
+    Container build
+            |
+            +--------------------+
+            |                    |
+            v                    v
+    CycloneDX SBOM         container artifact
+                                 |
+                                 v
+                         immutable SHA tag
+                                 |
+                                 v
+                            Amazon ECR
+                                 |
+                                 v
+                     authoritative digest
+                                 |
+                    +------------+------------+
+                    |                         |
+                    v                         v
+             build provenance           SBOM attestation
+                attestation
+                    |                         |
+                    +------------+------------+
+                                 |
+                                 v
+                        signed supply-chain
+                              evidence
+
+---
+
+# General Troubleshooting Principles Learned
+
+1. Inspect existing state before creating new infrastructure.
+2. Verify AWS account and region before diagnosing missing resources.
+3. Separate authentication, trust, authorization, and resource existence.
+4. Prefer short-lived workload identity over stored cloud credentials.
+5. Avoid unnecessary hard-coded account-specific configuration.
+6. Use least-privilege IAM permissions.
+7. Use immutable and traceable artifact identifiers.
+8. Treat vulnerability scanning as a continuously changing security signal.
+9. Do not weaken a working security gate merely to make CI green.
+10. Validate runtime behaviour after changing container dependencies.
+11. Prefer authoritative APIs over parsing human-oriented output.
+12. Remember that failed workflows may already have changed external systems.
+13. Account for eventual consistency when automating cloud APIs.
+14. Use exact resource IDs returned by creation commands when possible.
+15. Preserve troubleshooting knowledge so future failures become easier to solve.
+16. Understand why a fix works instead of stopping when the error disappears.
