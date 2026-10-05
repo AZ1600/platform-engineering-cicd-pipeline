@@ -95,14 +95,30 @@ jobs:
           IMAGE_NAME="$ECR_REGISTRY/$ECR_REPOSITORY"
           IMAGE_URI="$IMAGE_NAME:$IMAGE_TAG"
 
-          docker push "$IMAGE_URI" 2>&1 | tee push-output.txt
+          docker push "$IMAGE_URI"
 
-          IMAGE_DIGEST="$(
-            awk '/digest:/ {print $2; exit}' push-output.txt
-          )"
+          IMAGE_DIGEST=""
+
+          for attempt in 1 2 3 4 5; do
+            IMAGE_DIGEST="$(
+              aws ecr describe-images \
+                --repository-name "$ECR_REPOSITORY" \
+                --image-ids imageTag="$IMAGE_TAG" \
+                --region "$AWS_REGION" \
+                --query 'imageDetails[0].imageDigest' \
+                --output text 2>/dev/null || true
+            )"
+
+            if printf '%s\n' "$IMAGE_DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+              break
+            fi
+
+            echo "Image digest not available yet; retrying..."
+            sleep 2
+          done
 
           if ! printf '%s\n' "$IMAGE_DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
-            echo "Unable to determine a valid SHA-256 image digest" >&2
+            echo "Unable to resolve a valid SHA-256 digest from Amazon ECR" >&2
             exit 1
           fi
 

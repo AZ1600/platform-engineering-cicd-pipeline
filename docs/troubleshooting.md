@@ -930,3 +930,216 @@ A secure software-supply-chain process therefore needs both:
     continuously scan them
         +
     deliberately refresh them when security fixes become available
+
+---
+
+## 13. ECR Push Succeeded but the Workflow Failed While Parsing the Image Digest
+
+### Symptom
+
+The post-merge publishing workflow successfully completed:
+
+    Checkout repository
+    Configure AWS credentials with GitHub OIDC
+    Login to Amazon ECR
+    Build Docker image
+    Generate CycloneDX SBOM
+    Validate SBOM
+    Upload SBOM artifact
+
+The workflow then failed during:
+
+    Push Docker image to Amazon ECR
+
+The GitHub Actions job ended with:
+
+    Process completed with exit code 1
+
+The provenance and SBOM attestation steps were skipped.
+
+### Important Observation
+
+The container upload itself did not fail.
+
+Docker reported:
+
+    b75bebb0271e866ff688b1380daac768b8093586:
+    digest: sha256:e864467c713b29c2994fb4a9b2f6fde5f2c8fc161ece938915d28a5bcee7e153
+    size: 2404
+
+This proved that Amazon ECR had already accepted the image.
+
+The failure occurred after publication while the workflow attempted to extract
+the immutable digest.
+
+### Original Digest Parsing
+
+The workflow captured Docker output using:
+
+    docker push "$IMAGE_URI" 2>&1 | tee push-output.txt
+
+and attempted to extract the digest using:
+
+    awk '/digest:/ {print $2; exit}'
+
+The result was then validated against:
+
+    ^sha256:[0-9a-f]{64}$
+
+### Root Cause
+
+The parsing logic assumed that Docker output would have this simplified form:
+
+    digest: sha256:<digest> size: <size>
+
+Under that assumption:
+
+    $1 = digest:
+    $2 = sha256:<digest>
+
+The actual Docker output contained the image tag first:
+
+    <git-sha>: digest: sha256:<digest> size: 2404
+
+Therefore the fields were actually:
+
+    $1 = <git-sha>:
+    $2 = digest:
+    $3 = sha256:<digest>
+    $4 = size:
+    $5 = 2404
+
+The workflow extracted:
+
+    digest:
+
+instead of:
+
+    sha256:e864467c713b29c2994fb4a9b2f6fde5f2c8fc161ece938915d28a5bcee7e153
+
+The SHA-256 validation correctly rejected that value.
+
+### Why Simply Changing `$2` to `$3` Was Not Chosen
+
+Changing the parser to:
+
+    awk '/digest:/ {print $3; exit}'
+
+would fix this specific Docker output.
+
+However, it would still make the supply-chain workflow dependent on the
+human-readable output format of the Docker CLI.
+
+The image digest is security-sensitive because it becomes the subject of:
+
+    build provenance attestation
+    SBOM attestation
+
+A stronger solution is to obtain that value from the registry that actually
+stored the image.
+
+### Resolution
+
+The workflow now performs the push normally:
+
+    docker push "$IMAGE_URI"
+
+After publication, it queries Amazon ECR directly:
+
+    aws ecr describe-images \
+      --repository-name "$ECR_REPOSITORY" \
+      --image-ids imageTag="$IMAGE_TAG" \
+      --region "$AWS_REGION" \
+      --query 'imageDetails[0].imageDigest' \
+      --output text
+
+The returned digest must match:
+
+    sha256:<64 hexadecimal characters>
+
+before it is written to the GitHub Actions outputs.
+
+### Eventual Consistency Handling
+
+The workflow retries the ECR lookup several times.
+
+This accounts for the possibility that the image push completes immediately
+before the repository metadata becomes available through the ECR API.
+
+The workflow waits briefly between attempts and only continues once a valid
+SHA-256 digest is returned.
+
+### IAM Change
+
+The GitHub publishing role previously contained only the permissions required
+to authenticate and upload image layers.
+
+The following read permission was added:
+
+    ecr:DescribeImages
+
+It remains scoped to:
+
+    arn:aws:ecr:eu-west-2:808101329332:repository/platform-engineering-cicd
+
+No broad ECR read or administrative permission was added.
+
+### Why This Fix Is Stronger
+
+The old flow was:
+
+    Docker push
+        |
+        v
+    human-readable CLI output
+        |
+        v
+    text parsing
+        |
+        v
+    image digest
+
+The new flow is:
+
+    Docker push
+        |
+        v
+    Amazon ECR
+        |
+        v
+    ECR DescribeImages API
+        |
+        v
+    authoritative image digest
+        |
+        v
+    SHA-256 validation
+        |
+        v
+    provenance and SBOM attestations
+
+The registry is the authoritative source for the digest of the stored artifact.
+
+### Important Behaviour With Immutable Tags
+
+Although the GitHub Actions job failed, the image for the failed workflow had
+already been pushed successfully.
+
+Because the ECR repository uses immutable tags, rerunning the same publish
+workflow for the same Git commit would attempt to reuse an existing tag.
+
+The remediation is therefore committed as a new Git revision.
+
+After merge, the new main commit produces a new immutable ECR tag and the
+complete workflow can be tested safely.
+
+### Lesson
+
+A failed CI/CD job does not necessarily mean every earlier side effect was
+rolled back.
+
+When debugging deployment or publishing workflows, determine exactly which
+step failed and inspect the external system before retrying.
+
+For security-sensitive artifact metadata, prefer authoritative APIs over
+parsing human-oriented CLI output.
