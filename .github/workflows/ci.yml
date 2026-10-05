@@ -6,6 +6,7 @@ on:
 permissions:
   contents: read
   id-token: write
+  attestations: write
 
 concurrency:
   group: ecr-publish
@@ -13,8 +14,8 @@ concurrency:
 
 jobs:
   docker-build:
-    name: Build and publish image
-    runs-on: ubuntu-latest
+    name: Build, attest and publish image
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
 
     env:
@@ -23,39 +24,102 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Configure AWS credentials with GitHub OIDC
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: arn:aws:iam::808101329332:role/GitHubActionsPlatformCicdEcrPublisher
           aws-region: ${{ env.AWS_REGION }}
+          allowed-account-ids: 808101329332
 
       - name: Login to Amazon ECR
         id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
 
       - name: Build Docker image
         env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
           docker build \
-            --tag "$ECR_REPOSITORY:$IMAGE_TAG" \
+            --tag "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" \
             .
 
-      - name: Tag Docker image for Amazon ECR
+      - name: Generate CycloneDX SBOM
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker tag \
-            "$ECR_REPOSITORY:$IMAGE_TAG" \
+          docker run --rm \
+            --volume /var/run/docker.sock:/var/run/docker.sock \
+            --volume "$PWD:/workspace" \
+            aquasec/trivy:0.73.0@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c \
+            image \
+            --format cyclonedx \
+            --output /workspace/sbom.cdx.json \
+            --skip-version-check \
             "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
+      - name: Validate SBOM
+        run: |
+          python3 -m json.tool sbom.cdx.json >/dev/null
+
+          python3 - <<'PY'
+          import json
+
+          with open("sbom.cdx.json", encoding="utf-8") as handle:
+              sbom = json.load(handle)
+
+          if sbom.get("bomFormat") != "CycloneDX":
+              raise SystemExit("Expected a CycloneDX SBOM")
+
+          components = sbom.get("components", [])
+          print(f"CycloneDX SBOM validated with {len(components)} components")
+          PY
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom-${{ github.sha }}
+          path: sbom.cdx.json
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Push Docker image to Amazon ECR
+        id: push
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker push \
-            "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          IMAGE_NAME="$ECR_REGISTRY/$ECR_REPOSITORY"
+          IMAGE_URI="$IMAGE_NAME:$IMAGE_TAG"
+
+          docker push "$IMAGE_URI" 2>&1 | tee push-output.txt
+
+          IMAGE_DIGEST="$(
+            awk '/digest:/ {print $2; exit}' push-output.txt
+          )"
+
+          if ! printf '%s\n' "$IMAGE_DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+            echo "Unable to determine a valid SHA-256 image digest" >&2
+            exit 1
+          fi
+
+          echo "Published image digest: $IMAGE_DIGEST"
+
+          echo "image_name=$IMAGE_NAME" >> "$GITHUB_OUTPUT"
+          echo "image_digest=$IMAGE_DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Generate build provenance attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ steps.push.outputs.image_name }}
+          subject-digest: ${{ steps.push.outputs.image_digest }}
+
+      - name: Generate SBOM attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ steps.push.outputs.image_name }}
+          subject-digest: ${{ steps.push.outputs.image_digest }}
+          sbom-path: sbom.cdx.json
