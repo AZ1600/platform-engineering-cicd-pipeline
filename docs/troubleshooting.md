@@ -722,3 +722,211 @@ Several reusable engineering lessons came from this work:
 8. Validate assumptions with commands rather than relying on configuration alone.
 9. Preserve troubleshooting knowledge so failures become reusable engineering lessons.
 10. Understand why a fix works instead of stopping when the error disappears.
+
+---
+
+## 12. Trivy CI Failed Because the Digest-Pinned Base Image Became Vulnerable
+
+### Symptom
+
+The pull-request validation workflow failed at:
+
+    Scan container image for vulnerabilities
+
+The earlier steps passed:
+
+    Dockerfile lint
+    Docker image build
+
+but Trivy exited with status code 1.
+
+The remaining runtime checks were skipped because the vulnerability gate had
+already failed.
+
+### CI Security Policy
+
+The workflow scans the container using:
+
+    --severity HIGH,CRITICAL
+    --ignore-unfixed
+    --exit-code 1
+
+This means the workflow fails when Trivy detects HIGH or CRITICAL
+vulnerabilities that have known fixes.
+
+Unfixed findings are ignored by this particular gate.
+
+### Diagnosis
+
+The failure was reproduced locally using the same Trivy image and security
+policy used by GitHub Actions.
+
+The scan reported vulnerabilities in operating-system packages provided by the
+container base image, including packages such as:
+
+    util-linux
+    pcre2
+
+The application code itself was not the source of these findings.
+
+The Dockerfile used a digest-pinned version of:
+
+    nginxinc/nginx-unprivileged:1.30.4-alpine
+
+Digest pinning made the build reproducible, but it also meant the image did not
+automatically receive newer Alpine security fixes.
+
+### Root Cause
+
+The pinned NGINX/Alpine base image had become stale relative to current
+vulnerability intelligence and available patched packages.
+
+This demonstrates an important property of immutable dependency pinning:
+
+    reproducibility does not automatically provide security updates
+
+A digest-pinned image stays exactly the same until an engineer deliberately
+updates it.
+
+### Investigation
+
+A newer official unprivileged NGINX image was inspected:
+
+    nginxinc/nginx-unprivileged:1.30.5-alpine3.24
+
+The image was scanned independently with the same Trivy policy before changing
+the application Dockerfile.
+
+The result was:
+
+    Vulnerabilities: 0
+
+for the HIGH and CRITICAL vulnerability gate.
+
+This proved that refreshing the base image was an appropriate remediation
+before changing the project itself.
+
+### Resolution
+
+The Dockerfile base image was updated from the older digest-pinned NGINX image
+to the newer official:
+
+    nginxinc/nginx-unprivileged:1.30.5-alpine3.24
+
+The newer image was also pinned by digest so builds remain reproducible.
+
+The application image was then rebuilt locally.
+
+### Security Validation
+
+The rebuilt project image was scanned using the same command used by CI.
+
+The result was:
+
+    Target: platform-cicd:test
+    Vulnerabilities: 0
+
+The Trivy HIGH/CRITICAL security gate therefore passed.
+
+### Runtime Validation
+
+Updating a base image can change runtime behaviour, so the security scan alone
+was not considered sufficient evidence.
+
+The configured container identity was verified:
+
+    UID 101 verified
+    GID 101 verified
+
+The application was then started using the same hardened runtime restrictions
+used by CI:
+
+    read-only filesystem
+    all Linux capabilities dropped
+    no-new-privileges enabled
+    restricted tmpfs mounted at /tmp
+
+The container started successfully.
+
+### Application Validation
+
+An HTTP smoke test was performed against:
+
+    http://localhost:8080
+
+The expected application content was returned:
+
+    Platform Engineering CI/CD Pipeline
+
+The final result was:
+
+    Application smoke test passed
+
+### Why This Fix Works
+
+The newer upstream image contains patched operating-system packages while
+preserving the unprivileged NGINX runtime model required by the application.
+
+The fix therefore removes the vulnerable dependency versions without weakening
+the vulnerability policy.
+
+The complete validation path was:
+
+    refreshed trusted base image
+            |
+            v
+    rebuild application image
+            |
+            v
+    Trivy HIGH/CRITICAL scan
+            |
+            v
+    0 blocking vulnerabilities
+            |
+            v
+    verify UID/GID 101
+            |
+            v
+    hardened runtime test
+            |
+            v
+    HTTP smoke test
+            |
+            v
+    application validated
+
+### Why the Trivy Gate Was Not Disabled
+
+The failure was not solved by:
+
+    lowering severity
+    removing --exit-code 1
+    ignoring the CVEs
+    disabling vulnerability scanning
+
+The security gate was functioning correctly.
+
+Weakening the gate would have hidden the vulnerable dependency instead of
+removing it.
+
+### Lesson
+
+Digest pinning and vulnerability scanning solve different problems.
+
+Digest pinning provides:
+
+    reproducibility
+    predictable dependencies
+    resistance to silent upstream image changes
+
+Vulnerability scanning provides:
+
+    awareness when those frozen dependencies become unsafe
+
+A secure software-supply-chain process therefore needs both:
+
+    pin dependencies
+        +
+    continuously scan them
+        +
+    deliberately refresh them when security fixes become available
